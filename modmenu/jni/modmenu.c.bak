@@ -1,0 +1,180 @@
+#include <jni.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <sys/types.h>
+
+/* Direct kernel syscalls implemented in syscalls.s */
+extern long my_openat(int dirfd, const char *pathname, int flags, int mode);
+extern long my_read(int fd, void *buf, size_t count);
+extern long my_close(int fd);
+
+#define AT_FDCWD -100
+#define O_RDONLY 0
+
+typedef void* (*t_CurrenciesHandler_GetInstance)(void);
+typedef void (*t_CurrenciesHandler_UpdateCurrency)(void* instance, int64_t amount, int32_t type, uint8_t fromStart, uint8_t playAnim, void* economySource, void* method);
+typedef float (*t_CurrenciesHandler_GetAmount)(void* instance, int32_t type, void* method);
+
+static uintptr_t s_il2cpp_base = 0;
+static int s_initialized = 0;
+static int s_infinite_currency = 0;
+
+static t_CurrenciesHandler_GetInstance s_GetInstance = NULL;
+static t_CurrenciesHandler_UpdateCurrency s_UpdateCurrency = NULL;
+static t_CurrenciesHandler_GetAmount s_GetAmount = NULL;
+
+static uintptr_t parse_hex(const char* s) {
+    uintptr_t v = 0;
+    while (*s) {
+        char c = *s++;
+        if (c >= '0' && c <= '9') v = (v << 4) | (c - '0');
+        else if (c >= 'a' && c <= 'f') v = (v << 4) | (c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v = (v << 4) | (c - 'A' + 10);
+        else break;
+    }
+    return v;
+}
+
+static int my_strstr(const char* haystack, int len, const char* needle, int needle_len) {
+    if (needle_len > len) return -1;
+    for (int i = 0; i <= len - needle_len; i++) {
+        int match = 1;
+        for (int j = 0; j < needle_len; j++) {
+            if (haystack[i + j] != needle[j]) {
+                match = 0;
+                break;
+            }
+        }
+        if (match) return i;
+    }
+    return -1;
+}
+
+static uintptr_t find_il2cpp_base(void) {
+    int fd = (int)my_openat(AT_FDCWD, "/proc/self/maps", O_RDONLY, 0);
+    if (fd < 0) {
+        return 0;
+    }
+    char buf[4096];
+    char line[512];
+    int line_len = 0;
+    uintptr_t first_base = 0;
+    long n;
+
+    while ((n = my_read(fd, buf, sizeof(buf))) > 0) {
+        for (long i = 0; i < n; i++) {
+            char c = buf[i];
+            if (c == '\n' || line_len >= (int)sizeof(line) - 1) {
+                line[line_len] = '\0';
+                if (my_strstr(line, line_len, "libil2cpp.so", 12) >= 0) {
+                    uintptr_t addr = parse_hex(line);
+                    if (first_base == 0) {
+                        first_base = addr;
+                    }
+                    if (my_strstr(line, line_len, "r-xp", 4) >= 0 || my_strstr(line, line_len, "r--p", 4) >= 0) {
+                        if (first_base != 0) {
+                            my_close(fd);
+                            return first_base;
+                        }
+                    }
+                }
+                line_len = 0;
+            } else {
+                line[line_len++] = c;
+            }
+        }
+    }
+    my_close(fd);
+    return first_base;
+}
+
+static int init_bridge(void) {
+    if (s_initialized && s_GetInstance && s_UpdateCurrency) {
+        return 1;
+    }
+
+    s_il2cpp_base = find_il2cpp_base();
+    if (!s_il2cpp_base) {
+        return 0;
+    }
+
+    /*
+     * CurrenciesHandler RVAs (File offsets in libil2cpp.so):
+     * CurrenciesHandler.GetInstance = 0x3593D64
+     * CurrenciesHandler.UpdateCurrency(long) = 0x35948D4
+     * CurrenciesHandler.GetAmount = 0x3597FF4
+     */
+    s_GetInstance = (t_CurrenciesHandler_GetInstance)(s_il2cpp_base + 0x3593D64);
+    s_UpdateCurrency = (t_CurrenciesHandler_UpdateCurrency)(s_il2cpp_base + 0x35948D4);
+    s_GetAmount = (t_CurrenciesHandler_GetAmount)(s_il2cpp_base + 0x3597FF4);
+
+    s_initialized = 1;
+    return 1;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_fubugames_endlesspuncher_modmenu_ModMenu_nativeInit(JNIEnv* env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+    return (jboolean)(init_bridge() ? JNI_TRUE : JNI_FALSE);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_fubugames_endlesspuncher_modmenu_ModMenu_nativeAddCurrency(JNIEnv* env, jobject thiz, jint type, jlong amount) {
+    (void)env;
+    (void)thiz;
+    if (!init_bridge()) return JNI_FALSE;
+
+    void* instance = s_GetInstance();
+    if (!instance) {
+        return JNI_FALSE;
+    }
+
+    s_UpdateCurrency(instance, (int64_t)amount, (int32_t)type, 0, 0, NULL, NULL);
+    return JNI_TRUE;
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_fubugames_endlesspuncher_modmenu_ModMenu_nativeGetCurrencyAmount(JNIEnv* env, jobject thiz, jint type) {
+    (void)env;
+    (void)thiz;
+    if (!init_bridge()) return -1.0f;
+
+    void* instance = s_GetInstance();
+    if (!instance) {
+        return -1.0f;
+    }
+
+    return s_GetAmount(instance, (int32_t)type, NULL);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_fubugames_endlesspuncher_modmenu_ModMenu_nativeSetCurrencyAmount(JNIEnv* env, jobject thiz, jint type, jfloat targetAmount) {
+    (void)env;
+    (void)thiz;
+    if (!init_bridge()) return JNI_FALSE;
+
+    void* instance = s_GetInstance();
+    if (!instance) {
+        return JNI_FALSE;
+    }
+
+    float current = s_GetAmount(instance, (int32_t)type, NULL);
+    int64_t delta = (int64_t)(targetAmount - current);
+    s_UpdateCurrency(instance, delta, (int32_t)type, 0, 0, NULL, NULL);
+    return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_fubugames_endlesspuncher_modmenu_ModMenu_nativeToggleInfiniteCurrency(JNIEnv* env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+    s_infinite_currency = !s_infinite_currency;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_fubugames_endlesspuncher_modmenu_ModMenu_nativeIsInfiniteCurrencyEnabled(JNIEnv* env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+    return (jboolean)(s_infinite_currency ? JNI_TRUE : JNI_FALSE);
+}

@@ -1,0 +1,7 @@
+*.apk
+*.idsig
+*.save
+*.save.bak
+*.log
+*.dmp
+*.tmp
